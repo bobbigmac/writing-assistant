@@ -4,7 +4,19 @@ A live co-author service for markdown files. Watches files on disk, emits change
 
 The LLM is an assistant to the author, not the author. The human writes; the LLM reacts.
 
-## Install
+## For Humans
+
+This is a service that tries to get your editor to actually help you, without running away with itself. It can still reason in its own session, and dig up complex info, so you can ask your agent to do research, complete TODOs, while writing your actual document NOT writing in the chat (tho you can do that too).
+
+Just point your agent at this, tell it to install the extension, reload your IDE and then ask it to start the service. Some models are more willing than others, and it depends on some fallbacks to keep running, but just nag it if it starts dropping out and your agent should be able to co-author properly, like a critic on your shoulder. 
+
+Change the prompt files if you need specific personalities, preloaded are just the generics/basic
+
+It's pretty relaxed cos you get your full agent, but it only acts (reacts to your edit) when you save your md doc.
+
+## Install - 
+
+Let's face it, you're not reading past here unless you're an LLM. 
 
 ```bash
 # From the repo:
