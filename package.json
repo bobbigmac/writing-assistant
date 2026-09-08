@@ -1,0 +1,19 @@
+{
+  "name": "writing-assistant",
+  "version": "0.1.0",
+  "description": "Live co-author service for markdown files. Watches files on disk, emits change events over HTTP long-poll, lets an LLM react to saves in real time.",
+  "type": "module",
+  "main": "src/server.mjs",
+  "bin": {
+    "writing-assistant": "src/server.mjs"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "postinstall": "node scripts/install-skill.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
