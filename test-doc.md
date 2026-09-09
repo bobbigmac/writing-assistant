@@ -2,8 +2,8 @@
 
 This is a test of the live co-author system.
 
-The quick brown fox jumps over the lazy dog. This sentence has a typo: teh cat sat on the mat. Its also missing an apostrophe.
+The quick brown fox jumps over the lazy dog.
 
-Climate change is real and the ice caps are melting. Scientists say we have until 2030 to act decisively or face irreversible consequences.
+Climate change is real and the ice caps are melting.
 
-First new paragraph for testing incremental updates.
+-TODO: Add a paragraph about renewable energy with one concrete statistic.

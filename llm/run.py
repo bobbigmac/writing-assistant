@@ -119,6 +119,8 @@ def run_adapter() -> int:
         max_events=config.adapter.max_events_in_context,
         max_doc_lines=config.adapter.max_doc_lines,
         target_words=config.llm.target_words,
+        append_only_threshold_chars=config.adapter.append_only_threshold_chars,
+        rebuild_threshold=config.adapter.rebuild_threshold,
     )
     session.initialize()
 

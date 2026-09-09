@@ -5,6 +5,7 @@ Endpoints:
   POST /push              — body: {text} — push tokens onto the cache
   POST /generate          — body: {max_tokens, temperature, ...} — generate from cache
   POST /react             — body: {event_id, kind, summary, diff, document} — full reaction
+  POST /apply-edit        — body: {path, search, replace} — search/replace in a file
   POST /reset             — clear the cache and session
   GET  /state             — session state (cache tokens, document, events)
 
@@ -36,6 +37,8 @@ class LlmServer:
             max_events=config.adapter.max_events_in_context,
             max_doc_lines=config.adapter.max_doc_lines,
             target_words=config.llm.target_words,
+            append_only_threshold_chars=config.adapter.append_only_threshold_chars,
+            rebuild_threshold=config.adapter.rebuild_threshold,
         )
         self._httpd: Optional[ThreadingHTTPServer] = None
 
@@ -207,6 +210,37 @@ class LlmServer:
                         self._send_json(413, {"error": str(e)})
                     except Exception as e:
                         logger.exception("react failed")
+                        self._send_json(500, {"error": str(e)})
+                    return
+
+                if path == "/apply-edit":
+                    body = self._read_body()
+                    file_path = body.get("path")
+                    search = body.get("search", "")
+                    replace = body.get("replace", "")
+                    if not file_path or not search:
+                        self._send_json(400, {"error": "missing 'path' or 'search'"})
+                        return
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        if search not in content:
+                            self._send_json(404, {"error": "search text not found in file"})
+                            return
+                        new_content = content.replace(search, replace, 1)
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(new_content)
+                        logger.info("Applied edit to %s (%d -> %d chars)", file_path, len(content), len(new_content))
+                        self._send_json(200, {
+                            "ok": True,
+                            "path": file_path,
+                            "old_length": len(content),
+                            "new_length": len(new_content),
+                        })
+                    except FileNotFoundError:
+                        self._send_json(404, {"error": f"file not found: {file_path}"})
+                    except Exception as e:
+                        logger.exception("apply-edit failed")
                         self._send_json(500, {"error": str(e)})
                     return
 

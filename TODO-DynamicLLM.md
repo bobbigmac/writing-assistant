@@ -247,3 +247,78 @@ The "10x data centers" take is valid for making live KV sessions commercially vi
 4. Write the adapter
 5. Connect to writing-assistant
 6. If it works, consider scaling up (bigger model, vLLM, cloud GPU)
+
+---
+
+## Status: implemented and tested (2025-01)
+
+Steps 1-5 are done. Qwen2.5-3B-Instruct Q4_K_M runs on the RTX 4060 with full GPU offload + flash attention. Custom CUDA wheel built and preserved in `wheels/`. The adapter polls writing-assistant's `/next-event` long-poll, feeds events to a persistent KV-cache session, and prints reactions. All local, no remote providers.
+
+### What works
+
+- Model loads in ~7s, generates at ~15 tok/s, uses ~3GB VRAM (of 8GB).
+- System prompt (533 tokens) pushed once, never recomputed for the session lifetime.
+- Three cache strategies implemented and tested:
+  1. **Append-only (audit log)**: small edits appended as compact diff entries. Only the diff tokens are computed. Fastest path. Used for edits under `WAS_ADAPTER_APPEND_THRESHOLD` chars (default 500).
+  2. **Common-prefix truncation**: for larger edits, find where old and new document diverge, `llama_memory_seq_rm` from that point, re-eval only the tail. The prefix KV (system prompt + unchanged doc prefix) stays hot in VRAM. Uses `llama_cpp.llama_get_memory(ctx)` + `llama_cpp.llama_memory_seq_rm(mem, 0, pos, -1)`.
+  3. **Full rebuild (compaction)**: when cache exceeds `WAS_ADAPTER_REBUILD_THRESHOLD` (default 0.75 of n_ctx), reset and re-push: pinned prefix + current document snapshot + recent edit summaries. Amortized cost is low since it's infrequent.
+- Repetition loop detection in the engine: if any 8-token ngram repeats within the last 40 generated tokens, stop. Catches loops the sampling penalties miss.
+- `/apply-edit` endpoint on the LLM server (port 3849): `POST {path, search, replace}` does a single search/replace in a file. Returns 404 if search text not found.
+- Adapter parses `[APPLY-EDIT] ... SEARCH: ... REPLACE: ... [END APPLY-EDIT]` blocks from model reactions and applies them to the watched file.
+
+### What doesn't work (yet)
+
+#### Multi-sequence slot composition (the "slots fed by a dirty tester" idea)
+
+The TODO speculated about using separate slots/sequences as independent cache regions (slot 1: personalities, slot 2: document, slot 3: events) with different eviction policies, where a generation token attends to all of them.
+
+**Tested against llama.cpp's actual API. Does not work.**
+
+The low-level APIs exist: `llama_memory_seq_rm`, `llama_memory_seq_cp`, `llama_memory_seq_add`, `llama_memory_seq_keep`, accessed via `llama_cpp.llama_get_memory(ctx)`. Multi-sequence contexts can be created (`n_seq_max=4`, `kv_unified=True`). But cross-sequence attention requires **position coupling**: if a token is assigned to multiple seq_ids, those sequences must have the same position range. The error is:
+
+```
+init: sequence 1 is coupled to 0 in the input batch, but have diverged
+```
+
+You can `seq_cp` to mirror one sequence to another (same positions), then branch — but after divergence the branches can't cross-attend. Independent content regions (paragraph 1 in seq 0, paragraph 2 in seq 1) are impossible because each sequence starts at position 0 and the coupling check enforces position equality.
+
+This is a fundamental transformer attention constraint, not an API limitation. KV is sequentially dependent: token N's KV depends on all tokens 0..N-1. You can't have independent KV regions that a single generation attends to, because the regions can't share a position space without being identical.
+
+The "split tree" idea (split document into segments, keep unchanged segments' KV) fails for the same reason: everything after an edit has stale KV because it was computed attending to the old content. Only the common prefix is reusable.
+
+#### The 3B model doesn't follow structured output for TODOs
+
+The personality prompt tells the model about the `[APPLY-EDIT]` format for completing TODOs. The model doesn't produce these blocks. It either says "Clean, no notes" or treats the TODO as a what-next suggestion. A 3B instruction-tuned model is not reliable enough for structured output with a novel format.
+
+**Options for TODOs (future work):**
+
+1. **Larger model** — a 7B model (Qwen2.5-7B-Instruct Q4_K_M, ~4.5GB) might follow the structured format. Tight on 8GB VRAM with KV cache but possible with reduced context (4K instead of 8K). Worth testing.
+2. **Adapter-side TODO detection** — the adapter detects `-TODO:` in the diff, constructs a fill-in-the-blank prompt ("Write a paragraph about: <TODO text>"), takes the output as prose, and inserts it via the `/apply-edit` endpoint. The model just writes prose; the adapter handles the file mutation. This works with the 3B model but requires the adapter to be smarter about prompt construction.
+3. **Accept the limitation** — the 3B model is for reactive feedback only. TODOs are handled by the agentic layer (Devin) using its `read`/`edit` tools as described in `skills/writing-assistant/SKILL.md`. The local model and the agentic model serve different roles.
+
+#### Repetition still an issue
+
+Even with `repeat_penalty=1.18`, `frequency_penalty=0.4`, `presence_penalty=0.4`, tighter `top_p=0.8`, and the ngram repetition detector, the model still falls into loops that vary slightly per iteration (so the 8-token ngram check doesn't catch them). The loops are long enough to hit the 400-token ceiling. Options:
+- Increase penalties further (risk: degrades coherent output)
+- Longer ngram detection window (16 tokens instead of 8)
+- Fuzzy ngram matching (allow 1-2 token variation)
+- Lower `max_tokens` ceiling (the user prefers prompt guidance over hard caps, but 400 is already a compromise)
+- Better prompt engineering to reduce the model's tendency to loop
+
+### Architecture decisions made
+
+- **Single sequence (seq_id=0)**, not multi-slot. The multi-sequence API's position coupling requirement makes independent cache regions impossible. All content lives in one sequential stream.
+- **Append-only audit log as the primary strategy.** The document snapshot is pushed once; edits are appended as compact diff entries. The model sees the original doc + a running log of changes. This sidesteps the sequential dependency problem entirely — there's no document KV to invalidate.
+- **Common-prefix truncation for larger edits.** When a larger edit needs accurate document state, find the divergence point, `seq_rm` from there, re-eval the tail. The prefix KV stays hot.
+- **Full rebuild for compaction.** When the cache fills, reset and re-push with the current document state as a fresh snapshot. Rare and amortized.
+- **`max_tokens=400` as a safety ceiling**, not the primary length control. The prompt tells the model to keep under 150 words. The ceiling exists to prevent runaway generation, not to enforce conciseness.
+
+### Key files
+
+- `llm/engine.py` — wraps llama-cpp-python, exposes `push()`, `generate()`, `reset()`, `truncate()` (seq_rm-based)
+- `llm/session.py` — session manager with the three cache strategies
+- `llm/adapter.py` — polls writing-assistant, drives reactions, parses `[APPLY-EDIT]` blocks
+- `llm/server.py` — HTTP server with `/react`, `/apply-edit`, `/health`, `/state`
+- `llm/personalities.py` — combined system prompt with APPLY-EDIT format for TODOs
+- `llm/config.py` — env-driven config, includes strategy thresholds
+- `llm/test_multiseq.py` — the test script that proved multi-sequence cross-attention doesn't work

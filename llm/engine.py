@@ -231,6 +231,24 @@ class LlmEngine:
 
             generated_tokens.append(token_id)
 
+            # Repetition detection: if the last 20 tokens contain a repeated
+            # 8-token sequence, stop. This catches loops that penalties miss.
+            if len(generated_tokens) >= 40:
+                recent = generated_tokens[-40:]
+                # Check if any 8-token subsequence appears twice in last 40 tokens
+                seen = set()
+                loop_detected = False
+                for j in range(len(recent) - 8):
+                    ngram = tuple(recent[j:j+8])
+                    if ngram in seen:
+                        loop_detected = True
+                        break
+                    seen.add(ngram)
+                if loop_detected:
+                    logger.warning("Repetition loop detected after %d tokens, stopping", len(generated_tokens))
+                    finish_reason = "repetition"
+                    break
+
             # Eval the generated token back into the cache
             llm.eval([token_id])
             self._cache_token_count += 1
@@ -301,6 +319,53 @@ class LlmEngine:
         self._cache_token_count = 0
         self._last_generation_tokens = []
         logger.info("KV cache cleared (in-place reset)")
+
+    def truncate(self, from_pos: int) -> None:
+        """Surgically remove tokens from position `from_pos` to the end.
+
+        Uses llama.cpp's seq_rm to remove KV cache entries without clearing
+        the entire cache. The prefix (positions 0..from_pos-1) stays hot
+        in VRAM. Only the tail is removed and must be re-eval'd.
+
+        This is the common-prefix truncation strategy: when a document is
+        edited in the middle, we keep the unchanged prefix KV and only
+        recompute from the divergence point.
+
+        After truncation, the next push() will eval tokens starting at
+        from_pos, exactly where the old ones were removed.
+        """
+        llm = self._ensure_loaded()
+        if from_pos < 0 or from_pos > self._cache_token_count:
+            raise ValueError(f"from_pos {from_pos} out of range (cache has {self._cache_token_count} tokens)")
+
+        if from_pos == self._cache_token_count:
+            # Nothing to remove
+            return
+
+        if from_pos == 0:
+            # Full reset
+            self.reset()
+            return
+
+        # Use low-level seq_rm to remove from from_pos to end
+        # llama-cpp-python's Llama.eval() internally calls kv_cache_seq_rm
+        # before each batch, but we need to do it manually here.
+        # The Llama wrapper stores ctx as llm._ctx.ctx (LlamaContext.ctx)
+        import llama_cpp
+        ctx = llm._ctx.ctx
+        mem = llama_cpp.llama_get_memory(ctx)
+        llama_cpp.llama_memory_seq_rm(mem, 0, from_pos, -1)
+
+        removed = self._cache_token_count - from_pos
+        self._cache_token_count = from_pos
+        self._last_generation_tokens = []
+        logger.info(
+            "KV cache truncated: removed %d tokens from pos %d (cache now %d/%d)",
+            removed,
+            from_pos,
+            self._cache_token_count,
+            self._n_ctx,
+        )
 
     def rewind_last_generation(self) -> None:
         """Remove the last generation's tokens from the logical cache count.

@@ -7,13 +7,15 @@ This implements the wait-react cycle from AGENTS.md:
   1. Long-poll /next-event?since=LAST_ID
   2. Fetch all events since LAST_ID (catch up on missed saves)
   3. React to the combined diff
-  4. Update LAST_ID
-  5. Loop forever
+  4. Parse [APPLY-EDIT] blocks from the reaction and apply them to the file
+  5. Update LAST_ID
+  6. Loop forever
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.request
 from typing import Optional
@@ -22,6 +24,12 @@ from .config import AdapterConfig
 from .session import SessionManager
 
 logger = logging.getLogger(__name__)
+
+# Regex to extract [APPLY-EDIT] blocks from model reactions
+_APPLY_EDIT_RE = re.compile(
+    r"\[APPLY-EDIT\]\s*SEARCH:\s*(.*?)\s*REPLACE:\s*(.*?)\s*\[END APPLY-EDIT\]",
+    re.DOTALL,
+)
 
 
 class WritingAssistantAdapter:
@@ -53,6 +61,43 @@ class WritingAssistantAdapter:
             prefix = {"added": "+", "removed": "-", "context": " "}.get(line_type, " ")
             parts.append(f"{prefix} {line}")
         return "\n".join(parts)
+
+    def _apply_edits(self, reaction: str, file_path: str) -> int:
+        """Parse [APPLY-EDIT] blocks from a reaction and apply them to the file.
+
+        Returns the number of edits applied.
+        """
+        edits = _APPLY_EDIT_RE.findall(reaction)
+        if not edits:
+            return 0
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            logger.warning("Cannot apply edits: file not found: %s", file_path)
+            return 0
+
+        applied = 0
+        for search, replace in edits:
+            search = search.strip()
+            replace = replace.strip()
+            if not search:
+                logger.warning("Skipping empty SEARCH in APPLY-EDIT block")
+                continue
+            if search not in content:
+                logger.warning("APPLY-EDIT search text not found in file: %r", search[:80])
+                continue
+            content = content.replace(search, replace, 1)
+            applied += 1
+            logger.info("Applied edit: %r -> %r", search[:60], replace[:60])
+
+        if applied > 0:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Applied %d edit(s) to %s", applied, file_path)
+
+        return applied
 
     def _react_to_event(self, event: dict) -> Optional[str]:
         """Send an event to the session and get a reaction."""
@@ -117,6 +162,13 @@ class WritingAssistantAdapter:
 
                     reaction = self._react_to_event(ev)
                     if reaction:
+                        # Parse and apply any [APPLY-EDIT] blocks
+                        file_path = ev.get("path", "")
+                        if file_path:
+                            edits_applied = self._apply_edits(reaction, file_path)
+                            if edits_applied > 0:
+                                logger.info("Applied %d edit(s) from reaction to %s", edits_applied, file_path)
+
                         logger.info("=== REACTION TO EDIT #%d ===\n%s\n=== END REACTION ===", ev["id"], reaction)
                         print(f"\n{'='*60}", flush=True)
                         print(f"Reaction to edit #{ev['id']}:", flush=True)

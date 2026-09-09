@@ -47,15 +47,15 @@ class LlmConfig:
     top_k: int = _env_int("WAS_LLM_TOP_K", 40)
     # Qwen2.5 docs recommend repetition_penalty=1.05 for general chat.
     # We need stronger anti-repetition for short reactive feedback.
-    repeat_penalty: float = float(_env("WAS_LLM_REPEAT_PENALTY", "1.1"))
+    repeat_penalty: float = float(_env("WAS_LLM_REPEAT_PENALTY", "1.18"))
     # frequency_penalty: penalizes tokens proportional to how often they appeared.
     # presence_penalty: penalizes any token that has appeared at all.
     # Together these break repetition loops that repeat_penalty alone can't.
-    frequency_penalty: float = float(_env("WAS_LLM_FREQ_PENALTY", "0.2"))
-    presence_penalty: float = float(_env("WAS_LLM_PRESENCE_PENALTY", "0.2"))
+    frequency_penalty: float = float(_env("WAS_LLM_FREQ_PENALTY", "0.4"))
+    presence_penalty: float = float(_env("WAS_LLM_PRESENCE_PENALTY", "0.4"))
     # No artificial token cap — length is guided via the prompt (target_words).
     # This is a safety ceiling only, set high enough to never interfere.
-    max_tokens: int = _env_int("WAS_LLM_MAX_TOKENS", 1024)
+    max_tokens: int = _env_int("WAS_LLM_MAX_TOKENS", 400)
 
     # Target word count for reactions. Injected into the prompt as
     # "Keep your response under N words." This is the primary length
@@ -88,6 +88,18 @@ class AdapterConfig:
 
     # How many lines of document to include (sliding window from the end)
     max_doc_lines: int = _env_int("WAS_ADAPTER_MAX_DOC_LINES", 80)
+
+    # --- Cache strategy thresholds ---
+
+    # When to use append-only (audit log) vs common-prefix truncation.
+    # If the edit diff (in chars) is below this threshold, append it as
+    # an audit log entry. Above it, use common-prefix truncation to keep
+    # the document state accurate in the cache.
+    append_only_threshold_chars: int = _env_int("WAS_ADAPTER_APPEND_THRESHOLD", 500)
+
+    # When the cache is this full (fraction of n_ctx), trigger a full
+    # rebuild with compaction (re-snapshot current doc, summarize edits).
+    rebuild_threshold: float = float(_env("WAS_ADAPTER_REBUILD_THRESHOLD", "0.75"))
 
 
 @dataclass
