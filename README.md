@@ -58,15 +58,29 @@ curl -s -X POST http://127.0.0.1:3848/watch \
 ### Wait for events (long-poll)
 
 ```bash
-curl -s "http://127.0.0.1:3848/next-event?since=0"
-# blocks until a save happens, then returns the event JSON
+curl -s "http://127.0.0.1:3848/next-event"
+# blocks until the next save after this request, then returns the event JSON (includes id + actions)
 ```
 
 ### Catch up on missed events
 
 ```bash
-curl -s "http://127.0.0.1:3848/events?since=0"
-# returns JSON array of all events since id 0
+curl -s "http://127.0.0.1:3848/events?since=2"
+# returns JSON array of all events after id 2
+```
+
+### Get context around changes
+
+```bash
+curl -s "http://127.0.0.1:3848/context?since=2"
+# returns current file content around changed regions since event 2
+```
+
+### Fast replace (for TODO completions)
+
+```bash
+curl -s -X POST http://127.0.0.1:3848/replace -H 'Content-Type: application/json' \
+  -d '{"path": "/path/to/file.md", "find": "TODO: ...", "replace": "completed text"}'
 ```
 
 ## API
@@ -75,8 +89,10 @@ curl -s "http://127.0.0.1:3848/events?since=0"
 |----------|--------|-------------|
 | `/health` | GET | Liveness check |
 | `/state` | GET | Watched files + recent events |
-| `/next-event?since=N` | GET | Long-poll: blocks until event with id > N exists |
-| `/events?since=N` | GET | All events since id N as JSON array |
+| `/next-event` | GET | Long-poll: blocks until next save after request, returns event + actions |
+| `/events?since=N` | GET | All events after id N as JSON array |
+| `/context?since=N` | GET | Current file content around changed regions since event N |
+| `/replace` | POST | Fast find-and-replace. Body: `{"path", "find", "replace", "all"}` |
 | `/watch` | POST | Add file to watch list. Body: `{"path": "..."}` |
 | `/unwatch` | POST | Remove file. Body: `{"path": "..."}` |
 | `/cursor` | POST | Update cursor context. Body: `{"path": "...", "line": N, ...}` |
@@ -86,12 +102,13 @@ curl -s "http://127.0.0.1:3848/events?since=0"
 
 Devin uses `exec` + `get_output` to wait on `/next-event`:
 
-1. `exec: curl -s "http://127.0.0.1:3848/next-event?since=N"` (timeout=280000)
+1. `exec: curl -s "http://127.0.0.1:3848/next-event"` (timeout=280000)
    - Backgrounds after 10s, returns shell_id
 2. `get_output(shell_id)` — blocks until the human saves and the event arrives
-3. `exec: curl -s "http://127.0.0.1:3848/events?since=N"` — fetch all missed events
+3. `exec: curl -s "http://127.0.0.1:3848/events?since=<id from step 2>"` — fetch all missed events
 4. React in chat with all four personalities (corrector, enquirer, what-next, orchestrator)
-5. Loop
+5. For TODOs: `POST /replace` instead of read+edit
+6. Loop
 
 See `skills/writing-assistant/SKILL.md` for the full pattern.
 
@@ -114,7 +131,7 @@ Editor (human writes .md) ──save──> File on disk
                                           │
                           writing-assistant (Node, port 3848)
                                           │
-                          /next-event?since=N (long-poll, blocks until save)
+                          /next-event (long-poll, blocks until save)
                                           │
                                     Devin (LLM)
                                           │

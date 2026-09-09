@@ -12,8 +12,10 @@ Node HTTP server. The core of the system. Exposes:
 |----------|--------|-------------|
 | `/health` | GET | `{ ok, service, version, watched, sseClients, events }` |
 | `/state` | GET | Watched files + recent events (last 20) |
-| `/next-event?since=N` | GET | **Long-poll**: blocks until an event with id > N exists, returns it as JSON. This is the primary endpoint the LLM calls. |
-| `/events?since=N` | GET | All events since id N as JSON array. Used to catch up on missed events after a wait resolves. |
+| `/next-event` | GET | **Long-poll**: blocks until the next save after the request arrives, returns the event as JSON (includes `id` and `actions`). No params. |
+| `/events?since=N` | GET | All events after id N as JSON array. Use the `id` from `/next-event` as N. |
+| `/context?since=N` | GET | Current file content around changed regions since event N. Use when you need surrounding context, not just the diff lines. |
+| `/replace` | POST | Fast find-and-replace in a watched file. Body: `{"path": "...", "find": "...", "replace": "...", "all": false}`. Use for TODO completions instead of read+edit. |
 | `/watch` | POST | Add file to watch list. Body: `{"path": "/abs/path.md"}` |
 | `/unwatch` | POST | Remove file. Body: `{"path": "/abs/path.md"}` |
 | `/cursor` | POST | Update cursor context. Body: `{"path": "...", "line": N, "character": N, "selection": {...}}` |
@@ -23,11 +25,11 @@ Env vars: `WAS_HOST` (default `127.0.0.1`), `WAS_PORT` (default `3848`).
 
 ### `src/store.mjs` — event log + waiters
 
-In-memory append-only event log with monotonic IDs. Keeps the last 200 events. Maintains a set of `/next-event` long-poll resolvers — when `appendEvent` fires, it resolves all waiting long-polls. Also holds the cursor context registry (keyed by file path, populated by the extension).
+In-memory append-only event log with monotonic IDs. Keeps the last 200 events. Maintains a set of `/next-event` long-poll resolvers — when `appendEvent` fires, it resolves all waiting long-polls. `waitForNextEvent()` always blocks (never resolves immediately with existing events). Also holds the cursor context registry (keyed by file path, populated by the extension).
 
 ### `src/watcher.mjs` — file watcher
 
-Uses `fs.watch` with 300ms debounce. Keeps last-known content per file. On change, reads the new content, computes a line diff against the previous snapshot, attaches cursor context if available, and calls `appendEvent`. Handles file deletion (emits a `deleted` event and cleans up).
+Uses `fs.watch` with 300ms debounce. Keeps last-known content per file. On change, reads the new content, computes a line diff against the previous snapshot, attaches cursor context if available, and calls `appendEvent`. Handles file deletion (emits a `deleted` event and cleans up). Also provides `getFileContent` (read current content) and `replaceInFile` (find-and-replace on disk, used by `POST /replace`).
 
 ### `src/diff.mjs` — line diff
 
@@ -95,7 +97,7 @@ The solution is a two-phase wait:
 
 **Phase 1 — Launch the blocking call with `exec`:**
 ```
-exec: curl -s "http://127.0.0.1:3848/next-event?since=LAST_RESPONDED_ID"
+exec: curl -s "http://127.0.0.1:3848/next-event"
 ```
 - Set the `timeout` parameter high (280000ms) so exec doesn't kill it.
 - After 10s of no output, exec backgrounds the process and returns a `shell_id`.
@@ -123,36 +125,33 @@ get_output(shell_id=<the id from phase 1>)
      -H 'Content-Type: application/json' \
      -d '{"path": "/absolute/path/to/file.md"}'
 
-3. Track LAST_RESPONDED_ID. Start at the startup event id (usually 1).
+3. Enter the loop. No state to track — /next-event tells you the id, /events takes it.
 
 4. LOOP:
-   a. exec: curl -s "http://127.0.0.1:3848/next-event?since=LAST_RESPONDED_ID"  (timeout=280000)
+   a. exec: curl -s "http://127.0.0.1:3848/next-event"  (timeout=280000)
       -> backgrounds after 10s, returns shell_id
    
    b. get_output(shell_id=<from step a>)
       -> blocks until the human saves and an event arrives
-      -> returns the event JSON when it does
+      -> returns the event JSON when it does (includes id + actions)
       -> if "No output yet (still running)", call get_output again
    
-   c. When event arrives, IMMEDIATELY fetch ALL events since LAST_RESPONDED_ID:
-      exec: curl -s --max-time 5 "http://127.0.0.1:3848/events?since=LAST_RESPONDED_ID"
+   c. Take the id from the event, fetch ALL events since it:
+      exec: curl -s --max-time 5 "http://127.0.0.1:3848/events?since=<id from step b>"
       -> returns JSON array of all missed events
    
    d. React to the FULL SET of new events (not just the one that unblocked the wait).
-      - If the human left a TODO in the document, HELP WITH IT DIRECTLY: ask a
-        clarifying question, offer options, or stub structure into the doc.
-        Do NOT run TODOs through the personality lenses — personalities are for
-        reacting to the human's writing, not for servicing TODOs. See "TODOs vs
-        personalities" below.
+      - If the human left a TODO in the document, HELP WITH IT DIRECTLY via
+        POST /replace — no need to read+edit the whole file. Do NOT run TODOs
+        through the personality lenses.
+      - If you need surrounding context, call GET /context?since=<id>.
       - Otherwise, apply all four personalities (below) to the combined diff
         and post feedback in chat (the human's splitscreen surface).
       - Keep it concise.
    
-   e. Update LAST_RESPONDED_ID to the highest event id you responded to.
-   
-   f. Go to step a. ALWAYS. The loop never terminates on its own. Every
+   e. Go to step a. ALWAYS. The loop never terminates on its own. Every
       response — personality feedback, TODO help, a clarifying question, even
-      "got it, no notes" — ends by re-entering the wait loop (step a). The only
+      silence — ends by re-entering the wait loop (step a). The only
       reason to stop is the human explicitly ending the session.
 ```
 
@@ -166,7 +165,7 @@ Between the moment `/next-event` resolves and the moment you actually read its o
 - **Do NOT treat "No output yet (still running)" as an error.** It means the process is still waiting. Call `get_output` again.
 - **Do NOT send chat messages between get_output calls.** Every chat message you send ends your turn and the human has to prompt you again. If you need to wait silently, just call `get_output` again without outputting text.
 - **Do NOT use the SSE `/events` stream.** It requires a persistent connection and doesn't resolve cleanly. Use `/next-event` (long-poll) for waiting and `/events?since=N` (JSON) for catching up.
-- **Do NOT react to your own edits.** When you complete a TODO in the document, the service will fire an event for your edit. Skip events you generated by checking if the diff matches your own edit.
+- **Do NOT react to your own edits.** When you complete a TODO via `POST /replace`, the service fires an event for your edit. Skip it — just re-wait without reacting.
 - **Do NOT end your turn without re-entering the wait loop.** Every response — feedback, TODO help, a question, even silence — ends by going back to step (a) of the loop. The loop is the session. If you stop looping, the human has to re-prompt you, which defeats the live co-pilot pattern. The only valid reason to stop is the human explicitly ending the session.
 - **Do NOT run TODOs through the personalities.** A TODO is a request for help writing, not writing to critique. Help with the TODO directly; reserve personalities for the human's actual prose.
 
@@ -178,7 +177,7 @@ The pattern uses three of Devin's built-in tools in concert:
 
 2. **`get_output`** — the actual blocking wait. Called on the `shell_id` from `exec`, it returns the moment the process produces output (i.e., when the service resolves the long-poll). This is the "wait for event" step.
 
-3. **`read` / `edit`** — used to read the current document state when completing TODOs, and to write TODO completions into the document.
+3. **`read` / `edit`** — used when you need to read the current document state directly. For TODO completions, prefer `POST /replace` instead — it's faster and doesn't require reading the whole file.
 
 The skill (installed globally) tells Devin how to orchestrate these tools. The service is the adapter between the filesystem and Devin's HTTP-based tool interface. The extension optionally enriches events with cursor context.
 
