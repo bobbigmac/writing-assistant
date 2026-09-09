@@ -25,18 +25,12 @@ export function appendEvent(event) {
 }
 
 /**
- * Wait for the next event with id > sinceId.
- * Returns a promise that resolves when an event arrives.
- * Caller is responsible for adding a timeout if desired.
+ * Wait for the next event AFTER this call arrives.
+ * Always blocks — never resolves immediately with existing events.
+ * Returns a promise that resolves when the next event arrives.
  */
-export function waitForNextEvent(sinceId) {
+export function waitForNextEvent() {
   return new Promise((resolve) => {
-    // Check if an event already exists
-    const existing = events.filter((e) => e.id > sinceId);
-    if (existing.length > 0) {
-      resolve(existing[0]);
-      return;
-    }
     waiters.add(resolve);
   });
 }

@@ -62,6 +62,50 @@ export function getWatchedFiles() {
   return Array.from(watched.keys());
 }
 
+/**
+ * Get the current content of a watched file.
+ */
+export function getFileContent(filePath) {
+  const abs = path.resolve(filePath);
+  const entry = watched.get(abs);
+  if (entry) return entry.lastContent;
+  try {
+    return fs.readFileSync(abs, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Replace text in a watched file on disk.
+ * Returns { ok, path, eventId? } or { ok: false, error }.
+ * The watcher will fire a change event for the edit.
+ */
+export function replaceInFile(filePath, find, replace, replaceAll = false) {
+  const abs = path.resolve(filePath);
+  let content;
+  try {
+    content = fs.readFileSync(abs, "utf8");
+  } catch {
+    return { ok: false, error: `Cannot read ${abs}` };
+  }
+  if (!content.includes(find)) {
+    return { ok: false, error: `Text not found in ${abs}` };
+  }
+  let newContent;
+  if (replaceAll) {
+    newContent = content.split(find).join(replace);
+  } else {
+    newContent = content.replace(find, replace);
+  }
+  try {
+    fs.writeFileSync(abs, newContent, "utf8");
+  } catch {
+    return { ok: false, error: `Cannot write ${abs}` };
+  }
+  return { ok: true, path: abs, replaced: replaceAll ? content.split(find).length - 1 : 1 };
+}
+
 export function closeAllWatchers() {
   for (const [abs, entry] of watched) {
     entry.watcher.close();
