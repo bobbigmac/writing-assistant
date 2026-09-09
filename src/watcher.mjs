@@ -1,7 +1,8 @@
 /**
  * File watcher — watches a set of files on disk and emits change events.
- * Uses fs.watch with debouncing (300ms) to coalesce rapid saves.
- * Keeps the last-known content of each file to compute diffs.
+ * Uses fs.watch with minimal debouncing to coalesce filesystem burst events
+ * without adding perceptible latency. Keeps last-known content per file to
+ * compute diffs.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { lineDiff, summarizeDiff } from "./diff.mjs";
 
 const watched = new Map(); // filePath -> { watcher, lastContent, lastMtime }
 
-const DEBOUNCE_MS = 300;
+const DEBOUNCE_MS = Number(process.env.WAS_DEBOUNCE_MS || 50);
 
 export function watchFile(filePath) {
   const abs = path.resolve(filePath);
