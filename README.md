@@ -4,6 +4,8 @@ A live co-author service for markdown files. Watches files on disk, emits change
 
 The LLM is an assistant to the author, not the author. The human writes; the LLM reacts.
 
+![writing-assistant demo](images/writing-assistant-demo.png)
+
 ## For Humans
 
 This is a service that tries to get your editor to actually help you, without running away with itself. It can still reason in its own session, and dig up complex info, so you can ask your agent to do research, complete TODOs, while writing your actual document NOT writing in the chat (tho you can do that too).
